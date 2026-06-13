@@ -3,7 +3,7 @@ import { supabase } from "../lib/supabase-client";
 import { logger } from "../lib/logger";
 
 /* ═══════════════════════════════════════════════════════════════
-   SYSTEM INSTRUCTION — Quant Sniper v2
+   SYSTEM INSTRUCTION — Quant Sniper v3 (with Sharp Money + RAG)
    ═══════════════════════════════════════════════════════════════ */
 const SYSTEM_INSTRUCTION = `Anda adalah Quant Sniper, AI Analis Kuantitatif level elit yang spesialis dalam Value Betting berbasis data.
 
@@ -16,15 +16,25 @@ Cara kerja:
    Contoh: xG & Over 2.5 stats menunjukkan 70% kemungkinan gol tinggi, namun Bandar hanya price 54% → EV positif → AMBIL.
 4. Sebaliknya jika Prob. Bandar sudah lebih tinggi dari data nyata → NO BET.
 
+ANALISIS TREN PASAR (SHARP MONEY):
+Analisis juga Tren Pergerakan Odds. Perhatikan ke mana arah pasar bergerak (penurunan odds secara signifikan sering kali menunjukkan 'sharp money' atau informasi orang dalam). Bandingkan pergerakan harga ini dengan anomali statistik untuk mengkonfirmasi nilai +EV. Jika pasar bergerak ke arah yang sama dengan temuan statistik Anda, itu sinyal konfirmasi yang sangat kuat.
+
+PERINGATAN HISTORI (RAG):
+Jika ada catatan pelajaran dari pertandingan sebelumnya (tim yang sama atau kondisi serupa), gunakan itu sebagai konteks tambahan. Penyesuaian berbasis pengalaman nyata lebih berharga dari model teoritis.
+
 FORMAT OUTPUT WAJIB:
 ## 📊 Ringkasan Data Kunci
 (Sebutkan 3-5 angka statistik paling relevan dari kedua tim)
+
+## 📈 Analisis Tren Pasar
+(Interpretasikan pergerakan odds — apakah ada sharp money? Arah mana pasar bergerak?)
 
 ## 💹 Analisis Expected Value per Pasaran
 Untuk setiap pasaran yang tersedia, tampilkan:
 - Prob. Nyata (dari statistik): XX%
 - Prob. Implisit Bandar (dari odds): XX%
 - Selisih EV: +XX% / -XX%
+- Konfirmasi Tren Pasar: Searah / Berlawanan / Netral
 - Verdict: VALUE / NO VALUE
 
 ## 🎯 Rekomendasi Akhir
@@ -35,7 +45,7 @@ Untuk setiap pasaran yang tersedia, tampilkan:
 - Justifikasi matematis singkat (2-3 kalimat)`;
 
 /* ═══════════════════════════════════════════════════════════════
-   TIPE DATA ODDS
+   TIPE DATA
    ═══════════════════════════════════════════════════════════════ */
 interface OddsRow {
   bookmaker: string;
@@ -44,6 +54,28 @@ interface OddsRow {
   odds_2: number | null;
   odds_draw: number | null;
   captured_at?: string;
+}
+
+interface OddsMovementRow {
+  market_type: string;
+  bookmaker?: string;
+  home_odds?: number | null;
+  away_odds?: number | null;
+  draw_odds?: number | null;
+  over_odds?: number | null;
+  under_odds?: number | null;
+  btts_yes?: number | null;
+  btts_no?: number | null;
+  captured_at: string;
+}
+
+interface LessonRow {
+  home_team: string;
+  away_team: string;
+  bet_result: string;
+  lesson_text?: string | null;
+  market_bet?: string | null;
+  created_at: string;
 }
 
 interface MarketOdds {
@@ -75,12 +107,155 @@ function impliedProb(odds: number | null | undefined): string {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   ODDS MOVEMENT HISTORY — Fetch & Format
+   ═══════════════════════════════════════════════════════════════ */
+async function fetchOddsMovementTrend(fixtureId: string): Promise<OddsMovementRow[]> {
+  try {
+    const { data } = await supabase
+      .from("odds_movement_history")
+      .select("market_type, bookmaker, home_odds, away_odds, draw_odds, over_odds, under_odds, btts_yes, btts_no, captured_at")
+      .eq("fixture_id", fixtureId)
+      .order("captured_at", { ascending: false })
+      .limit(25);
+    return (data ?? []) as OddsMovementRow[];
+  } catch {
+    return [];
+  }
+}
+
+function formatOddsMovementTrend(rows: OddsMovementRow[]): string {
+  if (rows.length === 0) {
+    return "--- TREN PERGERAKAN ODDS: Belum ada histori pasar (baru pertama kali disync) ---";
+  }
+
+  const byMarket = new Map<string, OddsMovementRow[]>();
+  for (const row of rows) {
+    const key = row.market_type;
+    const existing = byMarket.get(key) ?? [];
+    existing.push(row);
+    byMarket.set(key, existing);
+  }
+
+  const lines: string[] = ["--- TREN PERGERAKAN ODDS (HISTORI PASAR) ---"];
+
+  for (const [market, snapshots] of byMarket) {
+    const sorted = [...snapshots]
+      .sort((a, b) => new Date(a.captured_at).getTime() - new Date(b.captured_at).getTime())
+      .slice(-5);
+
+    const mkt = market.toLowerCase();
+
+    if (mkt === "ml" || mkt === "1x2" || mkt === "h2h" || mkt === "match_winner") {
+      lines.push(`\nMarket 1X2 (${sorted.length} snapshot, terlama → terbaru):`);
+      sorted.forEach((s, i) => {
+        lines.push(
+          `  Snapshot ${i + 1} [${new Date(s.captured_at).toLocaleTimeString("id-ID")}]: ` +
+          `Home ${s.home_odds ?? "N/A"} / Draw ${s.draw_odds ?? "N/A"} / Away ${s.away_odds ?? "N/A"}`
+        );
+      });
+      if (sorted.length >= 2) {
+        const first = sorted[0];
+        const last = sorted[sorted.length - 1];
+        if (first.home_odds && last.home_odds) {
+          const diff = last.home_odds - first.home_odds;
+          if (Math.abs(diff) >= 0.05) {
+            const dir = diff < 0 ? "⬇ TURUN" : "⬆ NAIK";
+            const interpretation = diff < 0
+              ? "→ SHARP MONEY kemungkinan masuk ke Home (favorit semakin kuat)"
+              : "→ Pasar menjauh dari Home (uang bergerak ke Away/Draw)";
+            lines.push(`  ⚡ Pergerakan Home odds: ${dir} ${Math.abs(diff).toFixed(2)} ${interpretation}`);
+          }
+        }
+        if (first.away_odds && last.away_odds) {
+          const diff = last.away_odds - first.away_odds;
+          if (Math.abs(diff) >= 0.05) {
+            const dir = diff < 0 ? "⬇ TURUN" : "⬆ NAIK";
+            const interpretation = diff < 0
+              ? "→ SHARP MONEY kemungkinan masuk ke Away"
+              : "→ Pasar menjauh dari Away";
+            lines.push(`  ⚡ Pergerakan Away odds: ${dir} ${Math.abs(diff).toFixed(2)} ${interpretation}`);
+          }
+        }
+      }
+    } else if (mkt.includes("ou") || mkt.includes("total") || mkt === "totals") {
+      lines.push(`\nMarket Over/Under (${sorted.length} snapshot):`);
+      sorted.forEach((s, i) => {
+        lines.push(
+          `  Snapshot ${i + 1}: Over ${s.over_odds ?? "N/A"} / Under ${s.under_odds ?? "N/A"}`
+        );
+      });
+      if (sorted.length >= 2) {
+        const first = sorted[0];
+        const last = sorted[sorted.length - 1];
+        if (first.over_odds && last.over_odds) {
+          const diff = last.over_odds - first.over_odds;
+          if (Math.abs(diff) >= 0.05) {
+            const interpretation = diff < 0
+              ? "→ SHARP MONEY masuk ke Over (pasar antisipasi gol banyak)"
+              : "→ Uang masuk ke Under";
+            lines.push(`  ⚡ Over odds: ${diff < 0 ? "⬇ TURUN" : "⬆ NAIK"} ${Math.abs(diff).toFixed(2)} ${interpretation}`);
+          }
+        }
+      }
+    } else if (mkt === "btts" || mkt.includes("both_teams") || mkt.includes("both teams")) {
+      lines.push(`\nMarket BTTS (${sorted.length} snapshot):`);
+      sorted.forEach((s, i) => {
+        lines.push(
+          `  Snapshot ${i + 1}: Yes ${s.btts_yes ?? "N/A"} / No ${s.btts_no ?? "N/A"}`
+        );
+      });
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RAG — Fetch & Format Lessons Learned
+   ═══════════════════════════════════════════════════════════════ */
+async function fetchRelevantLessons(homeTeam: string, awayTeam: string): Promise<LessonRow[]> {
+  try {
+    const homeWord = homeTeam.split(" ")[0] ?? homeTeam;
+    const awayWord = awayTeam.split(" ")[0] ?? awayTeam;
+
+    const { data } = await supabase
+      .from("lessons_learned")
+      .select("home_team, away_team, bet_result, lesson_text, market_bet, created_at")
+      .or(
+        `home_team.ilike.%${homeWord}%,away_team.ilike.%${homeWord}%,` +
+        `home_team.ilike.%${awayWord}%,away_team.ilike.%${awayWord}%`
+      )
+      .order("created_at", { ascending: false })
+      .limit(5);
+    return (data ?? []) as LessonRow[];
+  } catch {
+    return [];
+  }
+}
+
+function formatLessonsBlock(lessons: LessonRow[]): string {
+  if (lessons.length === 0) return "";
+
+  const lines: string[] = ["\n--- PERINGATAN HISTORI (RAG — KNOWLEDGE BASE AI) ---"];
+  lines.push("Sistem menemukan catatan dari pertandingan sebelumnya yang melibatkan tim ini:");
+
+  for (const lesson of lessons) {
+    const icon = lesson.bet_result === "WIN" ? "✅" : "❌";
+    const date = new Date(lesson.created_at).toLocaleDateString("id-ID");
+    lines.push(`\n${icon} ${lesson.home_team} vs ${lesson.away_team} [${date}] → ${lesson.bet_result}`);
+    if (lesson.market_bet) lines.push(`   Market: ${lesson.market_bet}`);
+    if (lesson.lesson_text) lines.push(`   Pelajaran: ${lesson.lesson_text}`);
+  }
+
+  lines.push("\n⚠️  Sesuaikan analisis Anda hari ini berdasarkan catatan di atas.");
+  return lines.join("\n");
+}
+
+/* ═══════════════════════════════════════════════════════════════
    EKSTRAK & STRUKTURISASI ODDS
    ═══════════════════════════════════════════════════════════════ */
 function extractStructuredOdds(rows: OddsRow[]): StructuredOdds {
   const result: StructuredOdds = { matchWinner: [], overUnder: [], btts: [], other: [] };
-
-  /* Ambil hanya baris terbaru per (bookmaker, market_type) */
   const seen = new Map<string, OddsRow>();
   for (const row of rows) {
     const key = `${row.bookmaker}::${row.market_type}`;
@@ -89,9 +264,7 @@ function extractStructuredOdds(rows: OddsRow[]): StructuredOdds {
 
   for (const row of seen.values()) {
     const mt = (row.market_type ?? "").toLowerCase();
-
-    /* ── Match Winner / 1X2 / h2h ── */
-    if (mt === "h2h" || mt === "1x2" || mt === "match_winner" || mt === "match winner") {
+    if (mt === "h2h" || mt === "1x2" || mt === "match_winner" || mt === "match winner" || mt === "ml") {
       result.matchWinner.push({
         bookmaker: row.bookmaker,
         home: row.odds_1 ?? undefined,
@@ -103,9 +276,7 @@ function extractStructuredOdds(rows: OddsRow[]): StructuredOdds {
           away: impliedProb(row.odds_2),
         },
       });
-    }
-    /* ── Over/Under / Totals ── */
-    else if (mt === "totals" || mt === "over_under" || mt.includes("over") || mt.includes("total")) {
+    } else if (mt === "totals" || mt === "over_under" || mt.includes("over") || mt.includes("total")) {
       result.overUnder.push({
         bookmaker: row.bookmaker,
         over: row.odds_1 ?? undefined,
@@ -115,9 +286,7 @@ function extractStructuredOdds(rows: OddsRow[]): StructuredOdds {
           under: impliedProb(row.odds_2),
         },
       });
-    }
-    /* ── BTTS / Both Teams To Score ── */
-    else if (mt === "btts" || mt === "both_teams_to_score" || mt.includes("both teams")) {
+    } else if (mt === "btts" || mt === "both_teams_to_score" || mt.includes("both teams")) {
       result.btts.push({
         bookmaker: row.bookmaker,
         yes: row.odds_1 ?? undefined,
@@ -127,9 +296,7 @@ function extractStructuredOdds(rows: OddsRow[]): StructuredOdds {
           no: impliedProb(row.odds_2),
         },
       });
-    }
-    /* ── Pasaran Lainnya ── */
-    else {
+    } else {
       result.other.push({
         bookmaker: row.bookmaker,
         market: row.market_type,
@@ -139,7 +306,6 @@ function extractStructuredOdds(rows: OddsRow[]): StructuredOdds {
       });
     }
   }
-
   return result;
 }
 
@@ -148,8 +314,6 @@ function extractStructuredOdds(rows: OddsRow[]): StructuredOdds {
    ═══════════════════════════════════════════════════════════════ */
 function formatOddsBlock(homeTeam: string, awayTeam: string, odds: StructuredOdds): string {
   const lines: string[] = ["--- DATA HARGA PASAR (ODDS BANDAR) ---"];
-
-  /* Match Winner */
   if (odds.matchWinner.length > 0) {
     lines.push(`\n▪ Match Winner / 1X2 (${homeTeam} | Draw | ${awayTeam}):`);
     for (const o of odds.matchWinner) {
@@ -162,8 +326,6 @@ function formatOddsBlock(homeTeam: string, awayTeam: string, odds: StructuredOdd
   } else {
     lines.push(`\n▪ Match Winner / 1X2: Tidak ada data odds tersedia.`);
   }
-
-  /* Over/Under */
   if (odds.overUnder.length > 0) {
     lines.push(`\n▪ Over/Under Goals (Totals):`);
     for (const o of odds.overUnder) {
@@ -175,8 +337,6 @@ function formatOddsBlock(homeTeam: string, awayTeam: string, odds: StructuredOdd
   } else {
     lines.push(`\n▪ Over/Under Goals (Totals): Tidak ada data odds tersedia.`);
   }
-
-  /* BTTS */
   if (odds.btts.length > 0) {
     lines.push(`\n▪ Both Teams to Score (BTTS):`);
     for (const o of odds.btts) {
@@ -188,8 +348,6 @@ function formatOddsBlock(homeTeam: string, awayTeam: string, odds: StructuredOdd
   } else {
     lines.push(`\n▪ Both Teams to Score (BTTS): Tidak ada data odds tersedia.`);
   }
-
-  /* Pasaran lain */
   if (odds.other.length > 0) {
     lines.push(`\n▪ Pasaran Lainnya:`);
     for (const o of odds.other) {
@@ -201,23 +359,27 @@ function formatOddsBlock(homeTeam: string, awayTeam: string, odds: StructuredOdd
       );
     }
   }
-
   return lines.join("\n");
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   BUILD FULL PROMPT
+   BUILD FULL PROMPT (with Trend + RAG)
    ═══════════════════════════════════════════════════════════════ */
 function buildPrompt(
   homeTeam: string,
   awayTeam: string,
   oddsBlock: string,
+  trendBlock: string,
+  lessonsBlock: string,
   homeStats: Record<string, unknown>,
   awayStats: Record<string, unknown>,
 ): string {
   return `PERTANDINGAN: ${homeTeam} vs ${awayTeam}
 
 ${oddsBlock}
+
+${trendBlock}
+${lessonsBlock}
 
 --- STATISTIK ${homeTeam} (HOME) ---
 1. xG (xG, xGA, xGD, GF, GA): ${JSON.stringify(homeStats.stats_xg)}
@@ -292,6 +454,7 @@ export async function analyzeFixture(fixtureId: string): Promise<AnalysisResult>
 
   const homeTeam: string = fixture.home_team ?? fixture.home_name ?? fixture.home_team_name ?? fixture.team_home ?? "";
   const awayTeam: string = fixture.away_team ?? fixture.away_name ?? fixture.away_team_name ?? fixture.team_away ?? "";
+  const leagueName: string = fixture.league_name ?? fixture.league ?? "";
 
   if (!homeTeam || !awayTeam) {
     throw new Error("Fixture record is missing home_team or away_team fields");
@@ -308,7 +471,16 @@ export async function analyzeFixture(fixtureId: string): Promise<AnalysisResult>
   const structuredOdds = extractStructuredOdds((oddsRows ?? []) as OddsRow[]);
   const oddsBlock = formatOddsBlock(homeTeam, awayTeam, structuredOdds);
 
-  /* ── 3. Fetch team stats ── */
+  /* ── 3. Fetch odds movement trend + lessons (parallel) ── */
+  const [movementRows, lessons] = await Promise.all([
+    fetchOddsMovementTrend(fixtureId),
+    fetchRelevantLessons(homeTeam, awayTeam),
+  ]);
+
+  const trendBlock = formatOddsMovementTrend(movementRows);
+  const lessonsBlock = formatLessonsBlock(lessons);
+
+  /* ── 4. Fetch team stats ── */
   const STAT_COLS = "stats_xg, stats_fts, stats_btts, stats_goals_conceded, stats_goals_scored, stats_shots, stats_over_25, stats_over_35, stats_under, stats_team_form, stats_ht";
 
   const fetchStats = async (teamName: string): Promise<Record<string, unknown>> => {
@@ -338,11 +510,12 @@ export async function analyzeFixture(fixtureId: string): Promise<AnalysisResult>
   const STAT_KEYS = ["stats_xg","stats_fts","stats_btts","stats_goals_conceded","stats_goals_scored","stats_shots","stats_over_25","stats_over_35","stats_under","stats_team_form","stats_ht"] as const;
   console.log(`\n[AI-ANALYSIS] ════════════════════════════════`);
   console.log(`[AI-ANALYSIS] Fixture: ${homeTeam} vs ${awayTeam} (ID: ${fixtureId})`);
-  console.log(`[AI-ANALYSIS] Odds tersedia — 1X2: ${structuredOdds.matchWinner.length} buku | O/U: ${structuredOdds.overUnder.length} buku | BTTS: ${structuredOdds.btts.length} buku | Lain: ${structuredOdds.other.length}`);
+  console.log(`[AI-ANALYSIS] Odds — 1X2: ${structuredOdds.matchWinner.length} | O/U: ${structuredOdds.overUnder.length} | BTTS: ${structuredOdds.btts.length}`);
+  console.log(`[AI-ANALYSIS] Odds Trend Snapshots: ${movementRows.length} | RAG Lessons: ${lessons.length}`);
   console.log(`[AI-ANALYSIS] Status JSONB statistik:`);
   for (const key of STAT_KEYS) {
     const label = key.replace("stats_", "").padEnd(18);
-    console.log(`  ${label}  Home: ${homeStats[key] != null ? "✓ Ada" : "✗ Kosong"}  |  Away: ${awayStats[key] != null ? "✓ Ada" : "✗ Kosong"}`);
+    console.log(`  ${label}  Home: ${homeStats[key] != null ? "✓" : "✗"}  |  Away: ${awayStats[key] != null ? "✓" : "✗"}`);
   }
 
   /* ── Guard: tolak jika statistik kosong ── */
@@ -359,26 +532,31 @@ export async function analyzeFixture(fixtureId: string): Promise<AnalysisResult>
   }
 
   console.log(`[AI-ANALYSIS] Mengirim prompt ke Gemini (gemini-2.0-flash)...\n`);
-  logger.info({ fixtureId, homeTeam, awayTeam }, "Calling Gemini for analysis");
+  logger.info({ fixtureId, homeTeam, awayTeam, trendSnapshots: movementRows.length, ragLessons: lessons.length }, "Calling Gemini for analysis");
 
-  /* ── 4. Call Gemini ── */
+  /* ── 5. Call Gemini ── */
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
     model: "gemini-2.0-flash",
     systemInstruction: SYSTEM_INSTRUCTION,
   });
 
-  const promptText = buildPrompt(homeTeam, awayTeam, oddsBlock, homeStats, awayStats);
+  const promptText = buildPrompt(homeTeam, awayTeam, oddsBlock, trendBlock, lessonsBlock, homeStats, awayStats);
   const geminiResult = await model.generateContent(promptText);
   const predictionText = geminiResult.response.text();
 
   console.log(`[AI-ANALYSIS] Respons Gemini diterima (${predictionText.length} karakter).`);
 
-  /* ── 5. Simpan ke Supabase ── */
+  /* ── 6. Simpan ke ai_predictions ── */
   const { error: insertError } = await supabase.from("ai_predictions").insert({
-    fixture_id: fixtureId,
+    fixture_id: parseInt(fixtureId) || fixtureId,
     prediction_text: predictionText,
+    home_team: homeTeam,
+    away_team: awayTeam,
+    league: leagueName,
+    status: "active",
     created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
   });
 
   if (insertError) {

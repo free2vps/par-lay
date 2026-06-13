@@ -136,6 +136,17 @@ router.post("/config", async (req, res) => {
   }
 });
 
+router.post("/sync/settle", async (_req, res) => {
+  try {
+    const { runSettlement } = await import("../services/settlement");
+    const result = await runSettlement();
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    logger.error({ err }, "Settlement trigger failed");
+    res.status(500).json({ error: "Settlement failed" });
+  }
+});
+
 router.get("/sync/status", async (_req, res) => {
   try {
     const { count: totalCount, error: countErr } = await supabase

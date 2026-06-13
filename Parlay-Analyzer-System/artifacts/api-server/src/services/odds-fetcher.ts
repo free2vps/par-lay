@@ -114,6 +114,52 @@ async function fetchEventOdds(eventId: number, apiKey: string, bookmakers: strin
   return apiGet<ApiEvent>(`${BASE_URL}/odds?${params}`, `odds:${eventId}`);
 }
 
+async function insertOddsMovementSnapshot(
+  fixtureId: number,
+  bookmaker: string,
+  market: ApiMarket,
+): Promise<void> {
+  const name = (market.name ?? "").toLowerCase();
+  const o = market.odds[0] ?? {};
+
+  let row: Record<string, unknown> = {
+    fixture_id: String(fixtureId),
+    bookmaker,
+    market_type: market.name,
+    captured_at: new Date().toISOString(),
+  };
+
+  if (name === "ml" || name === "1x2" || name === "match_winner" || name === "h2h") {
+    row = { ...row,
+      home_odds:  o.home  ? parseFloat(o.home as string)  : null,
+      away_odds:  o.away  ? parseFloat(o.away as string)  : null,
+      draw_odds:  o.draw  ? parseFloat(o.draw as string)  : null,
+    };
+  } else if (name.includes("ou") || name.includes("total") || name.includes("over")) {
+    row = { ...row,
+      over_odds:  o.over  ? parseFloat(o.over  as string) : null,
+      under_odds: o.under ? parseFloat(o.under as string) : null,
+    };
+  } else if (name === "btts" || name.includes("both_teams") || name.includes("both teams")) {
+    row = { ...row,
+      btts_yes: o.yes ? parseFloat(o.yes as string) : null,
+      btts_no:  o.no  ? parseFloat(o.no  as string) : null,
+    };
+  } else if (name === "ah" || name.includes("handicap") || name.includes("spread")) {
+    row = { ...row,
+      home_odds:  o.home  ? parseFloat(o.home  as string) : null,
+      away_odds:  o.away  ? parseFloat(o.away  as string) : null,
+    };
+  } else {
+    return;
+  }
+
+  const { error } = await supabase.from("odds_movement_history").insert(row);
+  if (error) {
+    logger.debug({ error, fixtureId, bookmaker, market: market.name }, "odds_movement_history insert skipped");
+  }
+}
+
 async function saveEventAndOdds(event: ApiEvent, leagueSlug: string, leagueIdMap: Map<string, number>) {
   const leagueId = leagueIdMap.get(leagueSlug);
   if (!leagueId) {
@@ -142,7 +188,7 @@ async function saveEventAndOdds(event: ApiEvent, leagueSlug: string, leagueIdMap
 
   if (!event.bookmakers) return;
 
-  // 2. Upsert odds to Supabase
+  // 2. Upsert odds to Supabase + 3. Insert odds movement snapshot
   for (const [bookmaker, markets] of Object.entries(event.bookmakers)) {
     const firstMarket = markets[0];
     if (firstMarket && firstMarket.odds.length >= 2) {
@@ -166,6 +212,14 @@ async function saveEventAndOdds(event: ApiEvent, leagueSlug: string, leagueIdMap
         );
       if (oddsErr) {
         logger.warn({ error: oddsErr, eventId: event.id, bookmaker }, "Supabase odds upsert warning");
+      }
+
+      // 3. Record snapshot to odds_movement_history
+      await insertOddsMovementSnapshot(event.id, bookmaker, firstMarket);
+
+      // Also snapshot additional markets (OU, BTTS) if available
+      for (const mkt of markets.slice(1)) {
+        await insertOddsMovementSnapshot(event.id, bookmaker, mkt);
       }
     }
   }

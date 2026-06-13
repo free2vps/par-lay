@@ -1,0 +1,3 @@
+- [Supabase DDL Access](supabase-mgmt-api.md) — Gunakan management API (`api.supabase.com/v1/projects/{ref}/database/query`) + SUPABASE_ACCESS_TOKEN; service role key TIDAK bisa DDL
+- [AI Predictions Schema](ai-predictions-schema.md) — Kolom baru: prediction_text, home_team, away_team, league, home_score, away_score, ev_at_analysis, market_bet, settled_at
+- [RAG Architecture](rag-architecture.md) — lessons_learned → diinject ke Gemini prompt sebelum analisis; odds_movement_history → trend data; settlement cron jam 06:00 harian
