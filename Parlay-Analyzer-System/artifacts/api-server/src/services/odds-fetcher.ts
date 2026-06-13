@@ -59,6 +59,21 @@ interface ApiEvent {
   away: string;
   date: string;
   status: string;
+  /* Skor tersedia ketika status = "FT" / "AET" / "PEN" */
+  home_goals?: number | string | null;
+  away_goals?: number | string | null;
+  home_goals_ht?: number | string | null;
+  away_goals_ht?: number | string | null;
+  scores?: {
+    home?: number | string | null;
+    away?: number | string | null;
+    home_ht?: number | string | null;
+    away_ht?: number | string | null;
+  };
+  result?: {
+    home?: number | string | null;
+    away?: number | string | null;
+  };
   bookmakers?: Record<string, ApiMarket[]>;
 }
 
@@ -165,7 +180,25 @@ async function saveEventAndOdds(event: ApiEvent, leagueSlug: string, leagueIdMap
   if (!leagueId) {
     logger.warn({ leagueSlug }, "No league_id found for league — skipping fixture upsert");
   } else {
-    // 1. Upsert fixture to Supabase
+    // 1. Upsert fixture to Supabase — termasuk skor bila event sudah selesai
+    const resolvedHomeGoals =
+      event.home_goals != null ? Number(event.home_goals) :
+      event.scores?.home != null ? Number(event.scores.home) :
+      event.result?.home != null ? Number(event.result.home) : null;
+
+    const resolvedAwayGoals =
+      event.away_goals != null ? Number(event.away_goals) :
+      event.scores?.away != null ? Number(event.scores.away) :
+      event.result?.away != null ? Number(event.result.away) : null;
+
+    const resolvedHomeHT =
+      event.home_goals_ht != null ? Number(event.home_goals_ht) :
+      event.scores?.home_ht != null ? Number(event.scores.home_ht) : null;
+
+    const resolvedAwayHT =
+      event.away_goals_ht != null ? Number(event.away_goals_ht) :
+      event.scores?.away_ht != null ? Number(event.scores.away_ht) : null;
+
     const { error: fixtureErr } = await supabase
       .from("fixtures")
       .upsert(
@@ -178,6 +211,12 @@ async function saveEventAndOdds(event: ApiEvent, leagueSlug: string, leagueIdMap
           fixture_date: event.date,
           status_short: event.status,
           status_long: event.status,
+          /* Skor disimpan ketika tersedia dari API */
+          ...(resolvedHomeGoals !== null && { home_goals: resolvedHomeGoals }),
+          ...(resolvedAwayGoals !== null && { away_goals: resolvedAwayGoals }),
+          ...(resolvedHomeHT !== null && { home_goals_ht: resolvedHomeHT }),
+          ...(resolvedAwayHT !== null && { away_goals_ht: resolvedAwayHT }),
+          last_updated: new Date().toISOString(),
         },
         { onConflict: "fixture_id" },
       );

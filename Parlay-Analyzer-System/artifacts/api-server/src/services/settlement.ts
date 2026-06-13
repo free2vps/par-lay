@@ -1,26 +1,21 @@
+/**
+ * Settlement Service
+ *
+ * Arsitektur bersih:
+ *   - TUGAS SAYA   : ambil data (skor dari tabel `fixtures`), hitung WIN/LOSS secara matematika
+ *   - TUGAS GEMINI : evaluasi kenapa LOSS terjadi, buat pelajaran untuk RAG
+ *
+ * Tidak ada pemanggilan API eksternal di sini.
+ * Semua skor sudah disimpan oleh odds-fetcher ke tabel `fixtures`.
+ */
+
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { supabase } from "../lib/supabase-client";
 import { logger } from "../lib/logger";
 
-const BASE_URL = "https://api.odds-api.io/v3";
-
-interface ApiCompletedEvent {
-  id: number;
-  home: string;
-  away: string;
-  date: string;
-  status: string;
-  result?: {
-    home?: number | string;
-    away?: number | string;
-  };
-  scores?: {
-    home?: number | string;
-    away?: number | string;
-  };
-  home_score?: number | string;
-  away_score?: number | string;
-}
+/* ─────────────────────────────────────────
+   Tipe
+───────────────────────────────────────── */
 
 interface PendingPrediction {
   id: string;
@@ -33,44 +28,116 @@ interface PendingPrediction {
   league: string | null;
 }
 
-/* ── Fetch completed events from odds-api.io ── */
-async function fetchCompletedEvents(leagueSlug: string, apiKey: string): Promise<ApiCompletedEvent[]> {
-  try {
-    const params = new URLSearchParams({
-      apiKey,
-      sport: "football",
-      league: leagueSlug,
-      status: "completed",
-    });
-    const res = await fetch(`${BASE_URL}/events?${params}`);
-    if (!res.ok) return [];
-    const data = await res.json() as ApiCompletedEvent | ApiCompletedEvent[];
-    return Array.isArray(data) ? data : [data];
-  } catch {
-    return [];
+interface CompletedFixture {
+  fixture_id: number;
+  home_team_name: string;
+  away_team_name: string;
+  league_name: string;
+  status_short: string;
+  home_goals: number | null;
+  away_goals: number | null;
+}
+
+/* ─────────────────────────────────────────
+   Tentukan apakah prediksi adalah "NO BET"
+───────────────────────────────────────── */
+function isNoBet(prediction: PendingPrediction): boolean {
+  const text = (prediction.prediction_text ?? "").toLowerCase();
+  return (
+    text.includes("no bet") ||
+    text.includes("tidak disarankan") ||
+    text.includes("tidak ada taruhan") ||
+    text.includes("skip")
+  );
+}
+
+/* ─────────────────────────────────────────
+   Tentukan WIN/LOSS dari skor + market
+   Return null jika market tidak dikenali
+───────────────────────────────────────── */
+function calculateResult(
+  homeGoals: number,
+  awayGoals: number,
+  bestMarket: string | null,
+  predictionText: string | null,
+): "WIN" | "LOSS" | null {
+  const market = (bestMarket ?? "").toLowerCase().trim();
+  const text   = (predictionText ?? "").toLowerCase();
+
+  /* 1x2 / Moneyline */
+  if (market.includes("home") || market === "1" || market === "1x2_home") {
+    return homeGoals > awayGoals ? "WIN" : "LOSS";
   }
+  if (market.includes("away") || market === "2" || market === "1x2_away") {
+    return awayGoals > homeGoals ? "WIN" : "LOSS";
+  }
+  if (market.includes("draw") || market === "x" || market === "1x2_draw") {
+    return homeGoals === awayGoals ? "WIN" : "LOSS";
+  }
+
+  /* Over / Under */
+  if (market.includes("over") || market.includes("over_2")) {
+    const line = extractLine(market) ?? 2.5;
+    return (homeGoals + awayGoals) > line ? "WIN" : "LOSS";
+  }
+  if (market.includes("under")) {
+    const line = extractLine(market) ?? 2.5;
+    return (homeGoals + awayGoals) < line ? "WIN" : "LOSS";
+  }
+
+  /* BTTS */
+  if (market.includes("btts_yes") || market.includes("both teams to score yes")) {
+    return homeGoals > 0 && awayGoals > 0 ? "WIN" : "LOSS";
+  }
+  if (market.includes("btts_no") || market.includes("both teams to score no")) {
+    return homeGoals === 0 || awayGoals === 0 ? "WIN" : "LOSS";
+  }
+  if (market.includes("btts")) {
+    /* btts tanpa yes/no — inferensi dari teks */
+    if (text.includes("btts yes") || text.includes("kedua tim mencetak")) {
+      return homeGoals > 0 && awayGoals > 0 ? "WIN" : "LOSS";
+    }
+    return homeGoals > 0 && awayGoals > 0 ? "WIN" : "LOSS";
+  }
+
+  /* Asian Handicap — fallback ke 1x2 home bila tidak ada line */
+  if (market.includes("handicap") || market.includes("ah")) {
+    const line = extractLine(market);
+    if (line !== null) {
+      const adjustedHome = homeGoals + line; /* line negatif untuk favorit */
+      return adjustedHome > awayGoals ? "WIN" : "LOSS";
+    }
+    return homeGoals > awayGoals ? "WIN" : "LOSS";
+  }
+
+  /* Fallback: coba inferensi dari teks prediksi */
+  if (text.includes("menang") && (text.includes("home") || text.includes("tuan rumah"))) {
+    return homeGoals > awayGoals ? "WIN" : "LOSS";
+  }
+  if (text.includes("menang") && (text.includes("away") || text.includes("tamu"))) {
+    return awayGoals > homeGoals ? "WIN" : "LOSS";
+  }
+
+  return null; /* market tidak dikenali */
 }
 
-/* ── Extract score from API response ── */
-function extractScore(event: ApiCompletedEvent): { home: number | null; away: number | null } {
-  const home =
-    event.result?.home != null ? Number(event.result.home) :
-    event.scores?.home != null ? Number(event.scores.home) :
-    event.home_score != null ? Number(event.home_score) : null;
-
-  const away =
-    event.result?.away != null ? Number(event.result.away) :
-    event.scores?.away != null ? Number(event.scores.away) :
-    event.away_score != null ? Number(event.away_score) : null;
-
-  return { home, away };
+/* Helper: ekstrak angka dari string market (misal "over_2_5" → 2.5) */
+function extractLine(market: string): number | null {
+  const m = market.match(/(\d+)[_. ]?(\d+)?/);
+  if (!m) return null;
+  const whole = parseInt(m[1]!);
+  const frac  = m[2] ? parseInt(m[2]) / 10 : 0;
+  return whole + frac;
 }
 
-/* ── Ask Gemini to evaluate a LOSS prediction ── */
-async function evaluateLossWithGemini(
+/* ─────────────────────────────────────────
+   Gemini: evaluasi LOSS → buat pelajaran
+   (satu-satunya tugas Gemini di settlement)
+───────────────────────────────────────── */
+async function generateLossLesson(
   prediction: PendingPrediction,
-  homeScore: number,
-  awayScore: number,
+  homeGoals: number,
+  awayGoals: number,
   geminiKey: string,
 ): Promise<string | null> {
   try {
@@ -79,78 +146,75 @@ async function evaluateLossWithGemini(
 
     const prompt = `Anda adalah analis evaluasi pasca-pertandingan.
 
-Pertandingan: ${prediction.home_team} vs ${prediction.away_team}
-Skor Akhir: ${homeScore} - ${awayScore}
+Pertandingan : ${prediction.home_team} vs ${prediction.away_team}
+Skor Akhir   : ${homeGoals} - ${awayGoals}
+Pasaran Bet  : ${prediction.best_market ?? "tidak diketahui"}
+
 Prediksi AI sebelumnya:
-${prediction.prediction_text ?? "Tidak tersedia"}
+${prediction.prediction_text?.slice(0, 1500) ?? "Tidak tersedia"}
 
-Pertandingan ini menghasilkan hasil yang berbeda dari yang direkomendasikan.
+Hasil pertandingan ini BERBEDA dari yang direkomendasikan (LOSS).
 
-Tugas Anda:
-1. Identifikasi faktor kunci yang mungkin tidak terprediksi dengan baik (dalam 2-3 kalimat)
-2. Berikan 1 pelajaran konkret yang bisa dipakai untuk analisis pertandingan serupa di masa depan
-3. Format output: hanya tuliskan pelajarannya saja, tanpa intro atau header.`;
+Tugas Anda — tulis dalam 2-3 kalimat maksimal:
+1. Faktor kunci yang tidak terprediksi dengan baik
+2. Satu pelajaran konkret untuk analisis pertandingan serupa di masa depan
+
+Format: langsung tulis pelajarannya, tanpa intro, tanpa header, dalam bahasa Indonesia.`;
 
     const result = await model.generateContent(prompt);
     return result.response.text().trim();
   } catch (err) {
-    logger.warn({ err }, "Failed to get Gemini lesson evaluation");
+    logger.warn({ err }, "[SETTLEMENT] Gagal generate pelajaran dari Gemini");
     return null;
   }
 }
 
-/* ── Main settlement runner ── */
-export async function runSettlement(): Promise<{ settled: number; lessons: number }> {
+/* ─────────────────────────────────────────
+   Main runner — dipanggil oleh scheduler
+   dan endpoint POST /api/sync/settle
+───────────────────────────────────────── */
+export async function runSettlement(): Promise<{ settled: number; lessons: number; skipped: number }> {
   logger.info("[SETTLEMENT] Memulai pengecekan hasil pertandingan...");
 
-  const oddsApiKey = process.env["ODDS_API_KEY"];
-  const geminiKey  = process.env["GEMINI_API_KEY"];
+  const geminiKey = process.env["GEMINI_API_KEY"];
 
-  if (!oddsApiKey) {
-    logger.warn("[SETTLEMENT] ODDS_API_KEY tidak tersedia — skip");
-    return { settled: 0, lessons: 0 };
-  }
-
-  /* 1. Ambil semua prediksi yang statusnya masih active */
+  /* 1. Ambil prediksi yang masih aktif */
   const { data: pendingPredictions, error: predErr } = await supabase
     .from("ai_predictions")
     .select("id, fixture_id, prediction_text, best_market, home_team, away_team, expected_value, league")
     .eq("status", "active")
     .not("prediction_text", "is", null)
-    .limit(50);
+    .limit(100);
 
   if (predErr || !pendingPredictions?.length) {
     logger.info("[SETTLEMENT] Tidak ada prediksi aktif untuk di-settle");
-    return { settled: 0, lessons: 0 };
+    return { settled: 0, lessons: 0, skipped: 0 };
   }
 
-  /* 2. Ambil fixtures yang sudah selesai dari tabel kita */
   const fixtureIds = pendingPredictions.map((p) => p.fixture_id);
+
+  /* 2. Ambil fixtures yang sudah selesai BESERTA SKOR dari DB kita sendiri
+        Inilah sumber kebenaran — tidak perlu panggil API eksternal */
   const { data: completedFixtures } = await supabase
     .from("fixtures")
-    .select("fixture_id, home_team_name, away_team_name, league_name, status_short")
+    .select("fixture_id, home_team_name, away_team_name, league_name, status_short, home_goals, away_goals")
     .in("fixture_id", fixtureIds)
-    .in("status_short", ["FT", "AET", "PEN", "finished", "completed"]);
+    .in("status_short", ["FT", "AET", "PEN", "finished", "completed"])
+    .not("home_goals", "is", null)
+    .not("away_goals", "is", null) as { data: CompletedFixture[] | null };
 
   if (!completedFixtures?.length) {
-    logger.info("[SETTLEMENT] Tidak ada fixture selesai ditemukan");
-    return { settled: 0, lessons: 0 };
+    logger.info("[SETTLEMENT] Tidak ada fixture selesai dengan skor tersedia di DB");
+    return { settled: 0, lessons: 0, skipped: 0 };
   }
 
-  logger.info(`[SETTLEMENT] Ditemukan ${completedFixtures.length} fixture selesai dari ${pendingPredictions.length} prediksi aktif`);
+  logger.info(
+    `[SETTLEMENT] ${completedFixtures.length} fixture selesai ditemukan dari ${pendingPredictions.length} prediksi aktif`
+  );
 
-  /* 3. Ambil konfigurasi aktif untuk tahu liga apa yang ditrack */
-  const { data: cfg } = await supabase
-    .from("scheduler_config")
-    .select("leagues")
-    .limit(1)
-    .single();
-
-  const trackedLeagues: string[] = cfg?.leagues ?? [];
-
-  /* 4. Untuk setiap fixture selesai — cari skor dari odds-api.io */
-  let settled = 0;
-  let lessonsCreated = 0;
+  let settled  = 0;
+  let lessons  = 0;
+  let skipped  = 0;
 
   for (const fixture of completedFixtures) {
     const prediction = pendingPredictions.find(
@@ -158,129 +222,96 @@ export async function runSettlement(): Promise<{ settled: number; lessons: numbe
     ) as PendingPrediction | undefined;
     if (!prediction) continue;
 
-    /* Cari skor: coba semua liga yang kita track */
-    let homeScore: number | null = null;
-    let awayScore: number | null = null;
+    const homeGoals = fixture.home_goals!;
+    const awayGoals = fixture.away_goals!;
 
-    const leagueToSearch = trackedLeagues.length > 0 ? trackedLeagues : ["england-premier-league"];
-    for (const league of leagueToSearch) {
-      const events = await fetchCompletedEvents(league, oddsApiKey);
-      const match = events.find((e) => e.id === fixture.fixture_id);
-      if (match) {
-        const score = extractScore(match);
-        homeScore = score.home;
-        awayScore = score.away;
-        break;
-      }
+    /* 3. Lewati prediksi "NO BET" — tidak ada taruhan → tidak ada settlement */
+    if (isNoBet(prediction)) {
+      await supabase.from("ai_predictions").update({
+        status: "no_bet",
+        home_score: homeGoals,
+        away_score: awayGoals,
+        settled_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq("id", prediction.id);
+      skipped++;
+      continue;
     }
 
-    /* Jika tidak dapat skor dari API, skip settlement tapi catat */
-    if (homeScore === null || awayScore === null) {
-      logger.info({
+    /* 4. Hitung WIN/LOSS secara matematis murni dari skor */
+    const betResult = calculateResult(homeGoals, awayGoals, prediction.best_market, prediction.prediction_text);
+
+    if (betResult === null) {
+      /* Market tidak dikenali — tandai manual */
+      logger.warn({
         fixtureId: fixture.fixture_id,
-        home: fixture.home_team_name,
-        away: fixture.away_team_name,
-      }, "[SETTLEMENT] Skor tidak tersedia dari API — fixture diselesaikan tanpa skor");
+        bestMarket: prediction.best_market,
+      }, "[SETTLEMENT] Market tidak dikenali — perlu review manual");
 
       await supabase.from("ai_predictions").update({
-        status: "settled_no_score",
+        status: "settled_manual",
+        home_score: homeGoals,
+        away_score: awayGoals,
         settled_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }).eq("id", prediction.id);
 
-      settled++;
+      skipped++;
       continue;
     }
 
     logger.info({
       fixtureId: fixture.fixture_id,
-      home: fixture.home_team_name,
-      away: fixture.away_team_name,
-      score: `${homeScore}-${awayScore}`,
-    }, "[SETTLEMENT] Memproses hasil...");
+      match: `${fixture.home_team_name} ${homeGoals}-${awayGoals} ${fixture.away_team_name}`,
+      market: prediction.best_market,
+      result: betResult,
+    }, "[SETTLEMENT] Hasil dihitung");
 
-    /* 5. Tentukan WIN/LOSS berdasarkan best_market dan prediksi */
-    let betResult: "WIN" | "LOSS" | null = null;
-    const predText = (prediction.prediction_text ?? "").toLowerCase();
-    const bestMarket = (prediction.best_market ?? "").toLowerCase();
-
-    if (bestMarket.includes("home") || bestMarket.includes("1x2 home")) {
-      betResult = homeScore > awayScore ? "WIN" : "LOSS";
-    } else if (bestMarket.includes("away")) {
-      betResult = awayScore > homeScore ? "WIN" : "LOSS";
-    } else if (bestMarket.includes("draw")) {
-      betResult = homeScore === awayScore ? "WIN" : "LOSS";
-    } else if (bestMarket.includes("over") || predText.includes("over 2.5")) {
-      betResult = (homeScore + awayScore) > 2 ? "WIN" : "LOSS";
-    } else if (bestMarket.includes("under")) {
-      betResult = (homeScore + awayScore) < 3 ? "WIN" : "LOSS";
-    } else if (bestMarket.includes("btts")) {
-      betResult = homeScore > 0 && awayScore > 0 ? "WIN" : "LOSS";
-    } else {
-      /* Fallback: cek dari prediction_text */
-      if (predText.includes("**ambil**")) {
-        betResult = homeScore > awayScore ? "WIN" : "LOSS";
-      }
-    }
-
-    /* 6. Update ai_predictions status */
+    /* 5. Update status prediksi */
     await supabase.from("ai_predictions").update({
-      status: betResult ?? "settled_manual",
-      home_score: homeScore,
-      away_score: awayScore,
+      status: betResult,
+      home_score: homeGoals,
+      away_score: awayGoals,
       settled_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }).eq("id", prediction.id);
 
     settled++;
 
-    /* 7. Jika LOSS dan EV tinggi → minta Gemini evaluasi → simpan ke lessons_learned */
+    /* 6. Simpan ke lessons_learned untuk kedua hasil (WIN & LOSS)
+          LOSS: Gemini generate evaluasi kenapa salah
+          WIN : simpan catatan referensi positif tanpa Gemini */
     const evAtBet = prediction.expected_value ?? 0;
+
+    let lessonText: string | null = null;
     if (betResult === "LOSS" && geminiKey) {
-      logger.info({
-        fixtureId: fixture.fixture_id,
-        ev: evAtBet,
-      }, "[SETTLEMENT] LOSS terdeteksi — meminta evaluasi Gemini...");
-
-      const lessonText = await evaluateLossWithGemini(prediction, homeScore, awayScore, geminiKey);
-
-      const { error: lessonErr } = await supabase.from("lessons_learned").insert({
-        fixture_id: String(fixture.fixture_id),
-        home_team: prediction.home_team ?? fixture.home_team_name ?? "",
-        away_team: prediction.away_team ?? fixture.away_team_name ?? "",
-        league: prediction.league ?? fixture.league_name ?? "",
-        bet_result: betResult,
-        home_score: homeScore,
-        away_score: awayScore,
-        ev_at_bet: evAtBet,
-        ai_prediction: prediction.prediction_text?.slice(0, 2000) ?? null,
-        lesson_text: lessonText,
-        market_bet: prediction.best_market ?? null,
-        created_at: new Date().toISOString(),
-      });
-
-      if (!lessonErr) {
-        lessonsCreated++;
-        logger.info({ fixtureId: fixture.fixture_id }, "[SETTLEMENT] Pelajaran berhasil disimpan ke lessons_learned");
-      }
+      lessonText = await generateLossLesson(prediction, homeGoals, awayGoals, geminiKey);
     } else if (betResult === "WIN") {
-      /* Simpan juga WIN ke lessons_learned untuk referensi positif */
-      await supabase.from("lessons_learned").insert({
-        fixture_id: String(fixture.fixture_id),
-        home_team: prediction.home_team ?? fixture.home_team_name ?? "",
-        away_team: prediction.away_team ?? fixture.away_team_name ?? "",
-        league: prediction.league ?? fixture.league_name ?? "",
-        bet_result: "WIN",
-        home_score: homeScore,
-        away_score: awayScore,
-        ev_at_bet: evAtBet,
-        lesson_text: `Prediksi berhasil. Skor: ${homeScore}-${awayScore}. Market: ${prediction.best_market ?? "N/A"}`,
-        market_bet: prediction.best_market ?? null,
-        created_at: new Date().toISOString(),
-      });
+      lessonText = `Prediksi berhasil. Market: ${prediction.best_market ?? "N/A"}. Skor: ${homeGoals}-${awayGoals}. EV saat analisis: ${evAtBet.toFixed(2)}.`;
+    }
+
+    const { error: lessonErr } = await supabase.from("lessons_learned").insert({
+      fixture_id: String(fixture.fixture_id),
+      home_team:  prediction.home_team ?? fixture.home_team_name,
+      away_team:  prediction.away_team ?? fixture.away_team_name,
+      league:     prediction.league ?? fixture.league_name,
+      bet_result: betResult,
+      home_score: homeGoals,
+      away_score: awayGoals,
+      ev_at_bet:  evAtBet,
+      ai_prediction: prediction.prediction_text?.slice(0, 2000) ?? null,
+      lesson_text: lessonText,
+      market_bet:  prediction.best_market ?? null,
+      created_at:  new Date().toISOString(),
+    });
+
+    if (!lessonErr && betResult === "LOSS") {
+      lessons++;
     }
   }
 
-  logger.info(`[SETTLEMENT] Selesai: ${settled} diselesaikan, ${lessonsCreated} pelajaran dibuat`);
-  return { settled, lessons: lessonsCreated };
+  logger.info(
+    `[SETTLEMENT] Selesai: ${settled} diselesaikan (${lessons} pelajaran LOSS dibuat), ${skipped} dilewati`
+  );
+  return { settled, lessons, skipped };
 }
