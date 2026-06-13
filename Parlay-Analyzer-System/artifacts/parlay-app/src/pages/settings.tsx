@@ -3,10 +3,12 @@ import {
   useGetConfig,
   useSaveConfig,
   useTriggerSync,
+  useTriggerSettlement,
   useGetSyncStatus,
   useGetCatalog,
   getGetConfigQueryKey,
   getGetSyncStatusQueryKey,
+  type SettlementResult,
 } from "@/api/parlay-hooks";
 import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -16,7 +18,8 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
-import { RefreshCw, Save, Plus, X } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
+import { RefreshCw, Save, Plus, X, Bot, Gavel, ChevronDown, ChevronUp } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 function TagList({
@@ -191,11 +194,15 @@ export default function SettingsPage() {
   const { data: syncStatus } = useGetSyncStatus();
   const saveConfig = useSaveConfig();
   const triggerSync = useTriggerSync();
+  const triggerSettlement = useTriggerSettlement();
 
   const [leagues, setLeagues] = useState<string[]>([]);
   const [bookmakers, setBookmakers] = useState<string[]>([]);
   const [markets, setMarkets] = useState<string[]>([]);
   const [cronExpression, setCronExpression] = useState("0 */3 * * *");
+  const [aiPersona, setAiPersona] = useState("");
+  const [agentInstructions, setAgentInstructions] = useState("");
+  const [personaExpanded, setPersonaExpanded] = useState(false);
 
   const isLoading = configLoading || catalogLoading;
 
@@ -205,6 +212,8 @@ export default function SettingsPage() {
       setBookmakers(config.bookmakers ?? []);
       setMarkets(config.markets ?? []);
       setCronExpression(config.cronExpression ?? "0 */3 * * *");
+      setAiPersona(config.aiPersona ?? "");
+      setAgentInstructions(config.agentInstructions ?? "");
     }
   }, [config]);
 
@@ -223,10 +232,10 @@ export default function SettingsPage() {
   function handleSave(e: React.FormEvent) {
     e.preventDefault();
     saveConfig.mutate(
-      { data: { leagues, bookmakers, markets, cronExpression } },
+      { data: { leagues, bookmakers, markets, cronExpression, aiPersona: aiPersona || null, agentInstructions: agentInstructions || null } },
       {
         onSuccess: () => {
-          toast({ title: "Config tersimpan", description: "Konfigurasi scheduler berhasil diperbarui." });
+          toast({ title: "Config tersimpan", description: "Konfigurasi scheduler dan persona AI berhasil diperbarui." });
           queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
         },
         onError: () => {
@@ -248,26 +257,52 @@ export default function SettingsPage() {
     });
   }
 
+  function handleTriggerSettlement() {
+    triggerSettlement.mutate(undefined, {
+      onSuccess: (data: SettlementResult) => {
+        toast({
+          title: "Settlement selesai",
+          description: `${data.settled ?? 0} prediksi diselesaikan, ${data.lessons ?? 0} pelajaran baru.`,
+        });
+      },
+      onError: () => {
+        toast({ title: "Settlement gagal", variant: "destructive" });
+      },
+    });
+  }
+
   return (
     <div className="space-y-6 max-w-2xl">
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-foreground">Settings</h1>
-          <p className="text-muted-foreground text-sm">Konfigurasi scheduler dan kontrol manual.</p>
+          <p className="text-muted-foreground text-sm">Konfigurasi scheduler, persona AI, dan kontrol manual.</p>
         </div>
-        <Button
-          variant="outline"
-          onClick={handleTriggerSync}
-          disabled={triggerSync.isPending || syncStatus?.isRunning}
-          data-testid="button-trigger-sync"
-        >
-          <RefreshCw
-            className={`w-4 h-4 mr-2 ${
-              triggerSync.isPending || syncStatus?.isRunning ? "animate-spin" : ""
-            }`}
-          />
-          {syncStatus?.isRunning ? "Syncing..." : "Trigger Sync"}
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleTriggerSettlement}
+            disabled={triggerSettlement.isPending}
+            title="Settlement manual — cek hasil pertandingan yang sudah selesai"
+          >
+            <Gavel className={`w-4 h-4 mr-2 ${triggerSettlement.isPending ? "animate-pulse" : ""}`} />
+            {triggerSettlement.isPending ? "Settling..." : "Run Settlement"}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={handleTriggerSync}
+            disabled={triggerSync.isPending || syncStatus?.isRunning}
+            data-testid="button-trigger-sync"
+          >
+            <RefreshCw
+              className={`w-4 h-4 mr-2 ${
+                triggerSync.isPending || syncStatus?.isRunning ? "animate-spin" : ""
+              }`}
+            />
+            {syncStatus?.isRunning ? "Syncing..." : "Trigger Sync"}
+          </Button>
+        </div>
       </div>
 
       {syncStatus && (
@@ -383,6 +418,88 @@ export default function SettingsPage() {
             </form>
           )}
         </CardContent>
+      </Card>
+
+      {/* ── AI Persona & Instruksi ── */}
+      <Card className="bg-card border-border">
+        <CardHeader
+          className="cursor-pointer select-none"
+          onClick={() => setPersonaExpanded((v) => !v)}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Bot className="w-4 h-4 text-primary" />
+              <CardTitle className="text-base font-semibold">Persona & Instruksi Gemini</CardTitle>
+            </div>
+            {personaExpanded ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
+          </div>
+          <CardDescription className="text-xs text-muted-foreground">
+            Ubah cara Gemini berpikir dan apa yang harus diperhatikannya. Kosongkan untuk pakai default (Quant Sniper v3).
+          </CardDescription>
+        </CardHeader>
+
+        {personaExpanded && (
+          <CardContent className="space-y-6">
+            <div className="space-y-2">
+              <Label htmlFor="ai-persona" className="flex items-center gap-1.5">
+                Persona Gemini
+                <span className="text-xs font-normal text-muted-foreground">(System Instruction)</span>
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Ini adalah "kepribadian" dan aturan analisis yang dipakai Gemini setiap kali Anda klik <strong>Analisis Sekarang (AI)</strong>.
+                Jika dikosongkan, sistem akan memakai default Quant Sniper v3.
+              </p>
+              <Textarea
+                id="ai-persona"
+                value={aiPersona}
+                onChange={(e) => setAiPersona(e.target.value)}
+                placeholder={`Anda adalah Quant Sniper, AI Analis Kuantitatif level elit...\n\n(Kosongkan untuk pakai default)`}
+                rows={10}
+                className="font-mono text-xs resize-y"
+              />
+              <p className="text-xs text-muted-foreground">
+                {aiPersona.length > 0
+                  ? `${aiPersona.length} karakter — persona kustom aktif`
+                  : "Menggunakan persona default (Quant Sniper v3)"}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="agent-instructions" className="flex items-center gap-1.5">
+                Instruksi Tambahan untuk AI
+                <span className="text-xs font-normal text-muted-foreground">(Append ke persona)</span>
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Tambahan khusus yang selalu disertakan setelah persona — misalnya: "Fokus pada liga Asia", "Selalu analisis handicap terlebih dahulu", atau "Jangan rekomendasikan jika EV di bawah 5%".
+              </p>
+              <Textarea
+                id="agent-instructions"
+                value={agentInstructions}
+                onChange={(e) => setAgentInstructions(e.target.value)}
+                placeholder="Contoh: Fokus pada pasar Over/Under. Tolak bet bila ada keraguan. Selalu cek form 5 pertandingan terakhir."
+                rows={4}
+                className="text-sm resize-y"
+              />
+            </div>
+
+            <Button
+              onClick={() => {
+                saveConfig.mutate(
+                  { data: { aiPersona: aiPersona || null, agentInstructions: agentInstructions || null } },
+                  {
+                    onSuccess: () => toast({ title: "Persona tersimpan", description: "Gemini akan menggunakan persona baru pada analisis berikutnya." }),
+                    onError: () => toast({ title: "Gagal menyimpan persona", variant: "destructive" }),
+                  }
+                );
+              }}
+              disabled={saveConfig.isPending}
+              variant="outline"
+            >
+              <Save className="w-4 h-4 mr-2" />
+              {saveConfig.isPending ? "Menyimpan..." : "Simpan Persona"}
+            </Button>
+          </CardContent>
+        )}
       </Card>
     </div>
   );

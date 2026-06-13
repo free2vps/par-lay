@@ -3,9 +3,11 @@ import { supabase } from "../lib/supabase-client";
 import { logger } from "../lib/logger";
 
 /* ═══════════════════════════════════════════════════════════════
-   SYSTEM INSTRUCTION — Quant Sniper v3 (with Sharp Money + RAG)
+   DEFAULT SYSTEM INSTRUCTION — Quant Sniper v3
+   Digunakan sebagai fallback jika belum ada persona di Supabase.
+   Persona aktif dibaca dari scheduler_config.ai_persona saat runtime.
    ═══════════════════════════════════════════════════════════════ */
-const SYSTEM_INSTRUCTION = `Anda adalah Quant Sniper, AI Analis Kuantitatif level elit yang spesialis dalam Value Betting berbasis data.
+export const DEFAULT_SYSTEM_INSTRUCTION = `Anda adalah Quant Sniper, AI Analis Kuantitatif level elit yang spesialis dalam Value Betting berbasis data.
 
 TUGAS UTAMA: MENCARI SELISIH EXPECTED VALUE (EV)
 Cara kerja:
@@ -43,6 +45,29 @@ Untuk setiap pasaran yang tersedia, tampilkan:
 - Odds minimum yang masih value: X.XX
 - Skor Keyakinan: X/10
 - Justifikasi matematis singkat (2-3 kalimat)`;
+
+/* ═══════════════════════════════════════════════════════════════
+   LOAD AI CONFIG dari Supabase
+   Mengembalikan persona aktif + instruksi tambahan.
+   ═══════════════════════════════════════════════════════════════ */
+async function loadAIConfig(): Promise<{ persona: string; agentInstructions: string | null }> {
+  try {
+    const { data } = await supabase
+      .from("scheduler_config")
+      .select("ai_persona, agent_instructions")
+      .limit(1)
+      .single();
+
+    return {
+      persona: (data?.ai_persona && data.ai_persona.trim().length > 20)
+        ? data.ai_persona
+        : DEFAULT_SYSTEM_INSTRUCTION,
+      agentInstructions: data?.agent_instructions ?? null,
+    };
+  } catch {
+    return { persona: DEFAULT_SYSTEM_INSTRUCTION, agentInstructions: null };
+  }
+}
 
 /* ═══════════════════════════════════════════════════════════════
    TIPE DATA
@@ -534,11 +559,17 @@ export async function analyzeFixture(fixtureId: string): Promise<AnalysisResult>
   console.log(`[AI-ANALYSIS] Mengirim prompt ke Gemini (gemini-2.0-flash)...\n`);
   logger.info({ fixtureId, homeTeam, awayTeam, trendSnapshots: movementRows.length, ragLessons: lessons.length }, "Calling Gemini for analysis");
 
-  /* ── 5. Call Gemini ── */
+  /* ── 5. Load persona dari Supabase → Call Gemini ── */
+  const { persona, agentInstructions } = await loadAIConfig();
+  const finalPersona = agentInstructions
+    ? `${persona}\n\nINSTRUKSI TAMBAHAN:\n${agentInstructions}`
+    : persona;
+  console.log(`[AI-ANALYSIS] Persona sumber: ${persona === DEFAULT_SYSTEM_INSTRUCTION ? "DEFAULT (fallback)" : "SUPABASE (kustom)"}`);
+
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
     model: "gemini-2.0-flash",
-    systemInstruction: SYSTEM_INSTRUCTION,
+    systemInstruction: finalPersona,
   });
 
   const promptText = buildPrompt(homeTeam, awayTeam, oddsBlock, trendBlock, lessonsBlock, homeStats, awayStats);

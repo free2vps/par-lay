@@ -173,6 +173,20 @@ export function useTriggerSync() {
   });
 }
 
+/* ─── Trigger Settlement ─── */
+export interface SettlementResult {
+  ok: boolean;
+  settled: number;
+  lessons: number;
+  skipped: number;
+}
+
+export function useTriggerSettlement() {
+  return useMutation<SettlementResult, Error>({
+    mutationFn: () => apiPost<SettlementResult>(`${API_BASE}/sync/settle`),
+  });
+}
+
 /* ─── AI Analysis ─── */
 export interface AIAnalysisResult {
   fixture_id: string;

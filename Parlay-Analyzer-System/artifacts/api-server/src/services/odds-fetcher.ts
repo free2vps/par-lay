@@ -137,37 +137,66 @@ async function insertOddsMovementSnapshot(
   const name = (market.name ?? "").toLowerCase();
   const o = market.odds[0] ?? {};
 
-  let row: Record<string, unknown> = {
-    fixture_id: String(fixtureId),
-    bookmaker,
-    market_type: market.name,
-    captured_at: new Date().toISOString(),
-  };
+  let newOdds: Record<string, number | null> = {};
 
   if (name === "ml" || name === "1x2" || name === "match_winner" || name === "h2h") {
-    row = { ...row,
-      home_odds:  o.home  ? parseFloat(o.home as string)  : null,
-      away_odds:  o.away  ? parseFloat(o.away as string)  : null,
-      draw_odds:  o.draw  ? parseFloat(o.draw as string)  : null,
+    newOdds = {
+      home_odds: o.home  ? parseFloat(o.home as string)  : null,
+      away_odds: o.away  ? parseFloat(o.away as string)  : null,
+      draw_odds: o.draw  ? parseFloat(o.draw as string)  : null,
     };
   } else if (name.includes("ou") || name.includes("total") || name.includes("over")) {
-    row = { ...row,
+    newOdds = {
       over_odds:  o.over  ? parseFloat(o.over  as string) : null,
       under_odds: o.under ? parseFloat(o.under as string) : null,
     };
   } else if (name === "btts" || name.includes("both_teams") || name.includes("both teams")) {
-    row = { ...row,
+    newOdds = {
       btts_yes: o.yes ? parseFloat(o.yes as string) : null,
       btts_no:  o.no  ? parseFloat(o.no  as string) : null,
     };
   } else if (name === "ah" || name.includes("handicap") || name.includes("spread")) {
-    row = { ...row,
-      home_odds:  o.home  ? parseFloat(o.home  as string) : null,
-      away_odds:  o.away  ? parseFloat(o.away  as string) : null,
+    newOdds = {
+      home_odds: o.home  ? parseFloat(o.home  as string) : null,
+      away_odds: o.away  ? parseFloat(o.away  as string) : null,
     };
   } else {
-    return;
+    return; /* market tidak dikenal — skip */
   }
+
+  /* Deduplication: cek snapshot terakhir untuk fixture+bookmaker+market ini.
+     Jika odds identik → tidak ada perubahan → skip insert untuk hemat storage. */
+  try {
+    const { data: latest } = await supabase
+      .from("odds_movement_history")
+      .select("home_odds, away_odds, draw_odds, over_odds, under_odds, btts_yes, btts_no")
+      .eq("fixture_id", String(fixtureId))
+      .eq("bookmaker", bookmaker)
+      .eq("market_type", market.name)
+      .order("captured_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latest) {
+      const isDuplicate = Object.entries(newOdds).every(([key, val]) => {
+        const prev = latest[key as keyof typeof latest] as number | null;
+        if (val === null && prev === null) return true;
+        if (val === null || prev === null) return false;
+        return Math.abs(val - prev) < 0.005; /* toleransi floating point */
+      });
+      if (isDuplicate) return; /* odds tidak berubah — skip */
+    }
+  } catch {
+    /* Jika cek gagal, tetap insert untuk keamanan */
+  }
+
+  const row: Record<string, unknown> = {
+    fixture_id: String(fixtureId),
+    bookmaker,
+    market_type: market.name,
+    captured_at: new Date().toISOString(),
+    ...newOdds,
+  };
 
   const { error } = await supabase.from("odds_movement_history").insert(row);
   if (error) {

@@ -75,6 +75,8 @@ router.get("/config", async (_req, res) => {
       bookmakers: cfg.bookmakers,
       markets: cfg.markets,
       cronExpression: cfg.cron_expression,
+      aiPersona: cfg.ai_persona ?? null,
+      agentInstructions: cfg.agent_instructions ?? null,
       updatedAt: cfg.updated_at ?? null,
     });
   } catch (err) {
@@ -85,23 +87,27 @@ router.get("/config", async (_req, res) => {
 
 router.post("/config", async (req, res) => {
   try {
-    const { leagues, bookmakers, markets, cronExpression } = req.body;
+    const { leagues, bookmakers, markets, cronExpression, aiPersona, agentInstructions } = req.body;
     const { data: existing } = await supabase
       .from("scheduler_config")
       .select("id")
       .limit(1);
 
+    const updatePayload: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+    };
+    if (leagues !== undefined) updatePayload.leagues = leagues;
+    if (bookmakers !== undefined) updatePayload.bookmakers = bookmakers;
+    if (markets !== undefined) updatePayload.markets = markets;
+    if (cronExpression !== undefined) updatePayload.cron_expression = cronExpression;
+    if (aiPersona !== undefined) updatePayload.ai_persona = aiPersona;
+    if (agentInstructions !== undefined) updatePayload.agent_instructions = agentInstructions;
+
     let cfg;
     if (existing && existing.length > 0) {
       const { data: updated, error } = await supabase
         .from("scheduler_config")
-        .update({
-          leagues,
-          bookmakers,
-          markets,
-          cron_expression: cronExpression,
-          updated_at: new Date().toISOString(),
-        })
+        .update(updatePayload)
         .eq("id", existing[0]!.id)
         .select()
         .single();
@@ -115,6 +121,8 @@ router.post("/config", async (req, res) => {
           bookmakers,
           markets,
           cron_expression: cronExpression,
+          ai_persona: aiPersona ?? null,
+          agent_instructions: agentInstructions ?? null,
         })
         .select()
         .single();
@@ -128,6 +136,8 @@ router.post("/config", async (req, res) => {
       bookmakers: cfg.bookmakers,
       markets: cfg.markets,
       cronExpression: cfg.cron_expression,
+      aiPersona: cfg.ai_persona ?? null,
+      agentInstructions: cfg.agent_instructions ?? null,
       updatedAt: cfg.updated_at ?? null,
     });
   } catch (err) {
