@@ -1,0 +1,160 @@
+import { Router, type IRouter } from "express";
+import { supabase } from "../lib/supabase-client";
+import { logger } from "../lib/logger";
+import { isSyncRunning } from "../services/odds-fetcher";
+
+const router: IRouter = Router();
+
+async function getOrCreateConfig() {
+  const { data, error } = await supabase
+    .from("scheduler_config")
+    .select("*")
+    .limit(1);
+
+  if (error) {
+    logger.error({ error }, "Failed to fetch config");
+    throw error;
+  }
+
+  if (data && data.length > 0) return data[0]!;
+
+  // Create default config
+  const { data: created, error: insertErr } = await supabase
+    .from("scheduler_config")
+    .insert({
+      leagues: ["serie-a"],
+      bookmakers: ["Bet365", "Sbobet"],
+      markets: ["ML", "Totals", "BTTS", "Asian Handicap"],
+      cron_expression: "0 */3 * * *",
+    })
+    .select()
+    .single();
+
+  if (insertErr) {
+    logger.error({ error: insertErr }, "Failed to create default config");
+    throw insertErr;
+  }
+
+  return created!;
+}
+
+router.get("/config", async (_req, res) => {
+  try {
+    const cfg = await getOrCreateConfig();
+    res.json({
+      id: cfg.id,
+      leagues: cfg.leagues,
+      bookmakers: cfg.bookmakers,
+      markets: cfg.markets,
+      cronExpression: cfg.cron_expression,
+      updatedAt: cfg.updated_at ?? null,
+    });
+  } catch (err) {
+    logger.error({ err }, "Failed to get config");
+    res.status(500).json({ error: "Failed to get config" });
+  }
+});
+
+router.post("/config", async (req, res) => {
+  try {
+    const { leagues, bookmakers, markets, cronExpression } = req.body;
+    const { data: existing } = await supabase
+      .from("scheduler_config")
+      .select("id")
+      .limit(1);
+
+    let cfg;
+    if (existing && existing.length > 0) {
+      const { data: updated, error } = await supabase
+        .from("scheduler_config")
+        .update({
+          leagues,
+          bookmakers,
+          markets,
+          cron_expression: cronExpression,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", existing[0]!.id)
+        .select()
+        .single();
+      if (error) throw error;
+      cfg = updated!;
+    } else {
+      const { data: created, error } = await supabase
+        .from("scheduler_config")
+        .insert({
+          leagues,
+          bookmakers,
+          markets,
+          cron_expression: cronExpression,
+        })
+        .select()
+        .single();
+      if (error) throw error;
+      cfg = created!;
+    }
+
+    res.json({
+      id: cfg.id,
+      leagues: cfg.leagues,
+      bookmakers: cfg.bookmakers,
+      markets: cfg.markets,
+      cronExpression: cfg.cron_expression,
+      updatedAt: cfg.updated_at ?? null,
+    });
+  } catch (err) {
+    logger.error({ err }, "Failed to save config");
+    res.status(500).json({ error: "Failed to save config" });
+  }
+});
+
+router.get("/sync/status", async (_req, res) => {
+  try {
+    const { count: totalCount, error: countErr } = await supabase
+      .from("fixtures")
+      .select("*", { count: "exact", head: true });
+
+    if (countErr) {
+      logger.error({ error: countErr }, "Failed to count fixtures");
+    }
+
+    const { data: leagueRows, error: leagueErr } = await supabase
+      .from("fixtures")
+      .select("league_name");
+
+    if (leagueErr) {
+      logger.error({ error: leagueErr }, "Failed to fetch league breakdown");
+    }
+
+    const leagueMap = new Map<string, number>();
+    for (const row of leagueRows ?? []) {
+      leagueMap.set(row.league_name, (leagueMap.get(row.league_name) ?? 0) + 1);
+    }
+
+    const { data: lastSync, error: lastSyncErr } = await supabase
+      .from("fixtures")
+      .select("updated_at")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    if (lastSyncErr) {
+      logger.error({ error: lastSyncErr }, "Failed to fetch last sync");
+    }
+
+    res.json({
+      totalEvents: totalCount ?? 0,
+      lastSyncAt: lastSync?.updated_at ?? null,
+      isRunning: isSyncRunning(),
+      leagueBreakdown: Array.from(leagueMap.entries()).map(([leagueSlug, eventCount]) => ({
+        leagueSlug,
+        eventCount,
+      })),
+    });
+  } catch (err) {
+    logger.error({ err }, "Failed to get sync status");
+    res.status(500).json({ error: "Failed to get sync status" });
+  }
+});
+
+export default router;
