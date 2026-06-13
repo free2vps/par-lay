@@ -3,6 +3,30 @@ import { supabase } from "../lib/supabase-client";
 import { logger } from "../lib/logger";
 import { isSyncRunning } from "../services/odds-fetcher";
 
+export const LEAGUES_CATALOG = [
+  { slug: "england-premier-league",      name: "Premier League",         country: "Inggris" },
+  { slug: "england-championship",         name: "Championship",           country: "Inggris" },
+  { slug: "spain-laliga",                 name: "La Liga",                country: "Spanyol" },
+  { slug: "france-ligue-1",              name: "Ligue 1",                country: "Prancis" },
+  { slug: "italy-serie-a",               name: "Serie A",                country: "Italia" },
+  { slug: "netherlands-eredivisie",       name: "Eredivisie",             country: "Belanda" },
+  { slug: "germany-bundesliga",           name: "Bundesliga",             country: "Jerman" },
+  { slug: "uefa-champions-league",        name: "UEFA Champions League",  country: "UEFA" },
+  { slug: "uefa-europa-league",           name: "UEFA Europa League",     country: "UEFA" },
+  { slug: "fifa-world-cup",              name: "FIFA World Cup",         country: "FIFA" },
+  { slug: "republic-of-korea-k-league-1","name": "K-League 1",           country: "Korea" },
+  { slug: "china-chinese-super-league",  name: "Chinese Super League",   country: "China" },
+  { slug: "japan-j1-league",             name: "J1 League",              country: "Jepang" },
+];
+
+export const MARKETS_CATALOG = [
+  { key: "ML",     label: "1X2 / Match Result",              description: "Full time match winner (Home/Draw/Away)" },
+  { key: "AH",     label: "Alternate Spread",                description: "Asian Handicap — alternative line spreads" },
+  { key: "Totals", label: "Alternate Totals",                description: "Over/Under — alternative total goals lines" },
+  { key: "HT",     label: "Half Time Result",                description: "Half time score / 1X2 at half time" },
+  { key: "BTTS",   label: "Both Teams To Score (BTTS)",      description: "Yes / No — both teams score at least one goal" },
+];
+
 const router: IRouter = Router();
 
 async function getOrCreateConfig() {
@@ -37,6 +61,10 @@ async function getOrCreateConfig() {
 
   return created!;
 }
+
+router.get("/catalog", (_req, res) => {
+  res.json({ leagues: LEAGUES_CATALOG, markets: MARKETS_CATALOG });
+});
 
 router.get("/config", async (_req, res) => {
   try {

@@ -4,6 +4,7 @@ import {
   useSaveConfig,
   useTriggerSync,
   useGetSyncStatus,
+  useGetCatalog,
   getGetConfigQueryKey,
   getGetSyncStatusQueryKey,
 } from "@/api/parlay-hooks";
@@ -13,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { RefreshCw, Save, Plus, X } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -49,7 +51,12 @@ function TagList({
       <Label>{label}</Label>
       <div className="flex flex-wrap gap-2 min-h-8">
         {items.map((item) => (
-          <Badge key={item} variant="secondary" className="flex items-center gap-1 font-mono text-xs" data-testid={`badge-${testId}-${item}`}>
+          <Badge
+            key={item}
+            variant="secondary"
+            className="flex items-center gap-1 font-mono text-xs"
+            data-testid={`badge-${testId}-${item}`}
+          >
             {item}
             <button
               type="button"
@@ -67,14 +74,110 @@ function TagList({
           value={newItem}
           onChange={(e) => setNewItem(e.target.value)}
           placeholder={placeholder}
-          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); }}}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              add();
+            }
+          }}
           className="text-sm font-mono h-8"
           data-testid={`input-add-${testId}`}
         />
-        <Button type="button" variant="outline" size="sm" onClick={add} data-testid={`button-add-${testId}`}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={add}
+          data-testid={`button-add-${testId}`}
+        >
           <Plus className="w-3.5 h-3.5" />
         </Button>
       </div>
+    </div>
+  );
+}
+
+function CheckboxGrid<T extends { slug?: string; key?: string; name?: string; label?: string; country?: string; description?: string }>({
+  sectionLabel,
+  items,
+  selected,
+  onToggle,
+  getId,
+  getLabel,
+  getMeta,
+}: {
+  sectionLabel: string;
+  items: T[];
+  selected: string[];
+  onToggle: (id: string) => void;
+  getId: (item: T) => string;
+  getLabel: (item: T) => string;
+  getMeta?: (item: T) => string | undefined;
+}) {
+  const selectedCount = selected.length;
+  const total = items.length;
+
+  function toggleAll() {
+    if (selectedCount === total) {
+      items.forEach((item) => {
+        if (selected.includes(getId(item))) onToggle(getId(item));
+      });
+    } else {
+      items.forEach((item) => {
+        if (!selected.includes(getId(item))) onToggle(getId(item));
+      });
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <Label>{sectionLabel}</Label>
+        <button
+          type="button"
+          onClick={toggleAll}
+          className="text-xs text-muted-foreground hover:text-primary transition-colors"
+        >
+          {selectedCount === total ? "Hapus semua" : "Pilih semua"}
+        </button>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        {items.map((item) => {
+          const id = getId(item);
+          const isChecked = selected.includes(id);
+          const meta = getMeta?.(item);
+          return (
+            <label
+              key={id}
+              className={`flex items-start gap-3 p-3 rounded-md border cursor-pointer transition-colors ${
+                isChecked
+                  ? "border-primary/60 bg-primary/5"
+                  : "border-border bg-card hover:border-border/80 hover:bg-muted/30"
+              }`}
+            >
+              <Checkbox
+                checked={isChecked}
+                onCheckedChange={() => onToggle(id)}
+                className="mt-0.5 shrink-0"
+                data-testid={`checkbox-${sectionLabel.toLowerCase().replace(/\s/g, "-")}-${id}`}
+              />
+              <div className="min-w-0">
+                <span className="text-sm font-medium leading-tight block">{getLabel(item)}</span>
+                {meta && (
+                  <span className="text-xs text-muted-foreground font-mono leading-tight block mt-0.5">
+                    {meta}
+                  </span>
+                )}
+              </div>
+            </label>
+          );
+        })}
+      </div>
+      {selectedCount > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {selectedCount} dari {total} dipilih
+        </p>
+      )}
     </div>
   );
 }
@@ -83,7 +186,8 @@ export default function SettingsPage() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const { data: config, isLoading } = useGetConfig();
+  const { data: config, isLoading: configLoading } = useGetConfig();
+  const { data: catalog, isLoading: catalogLoading } = useGetCatalog();
   const { data: syncStatus } = useGetSyncStatus();
   const saveConfig = useSaveConfig();
   const triggerSync = useTriggerSync();
@@ -92,6 +196,8 @@ export default function SettingsPage() {
   const [bookmakers, setBookmakers] = useState<string[]>([]);
   const [markets, setMarkets] = useState<string[]>([]);
   const [cronExpression, setCronExpression] = useState("0 */3 * * *");
+
+  const isLoading = configLoading || catalogLoading;
 
   useEffect(() => {
     if (config) {
@@ -102,17 +208,29 @@ export default function SettingsPage() {
     }
   }, [config]);
 
+  function toggleLeague(slug: string) {
+    setLeagues((prev) =>
+      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug]
+    );
+  }
+
+  function toggleMarket(key: string) {
+    setMarkets((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  }
+
   function handleSave(e: React.FormEvent) {
     e.preventDefault();
     saveConfig.mutate(
       { data: { leagues, bookmakers, markets, cronExpression } },
       {
         onSuccess: () => {
-          toast({ title: "Config saved", description: "Scheduler configuration updated." });
+          toast({ title: "Config tersimpan", description: "Konfigurasi scheduler berhasil diperbarui." });
           queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
         },
         onError: () => {
-          toast({ title: "Save failed", variant: "destructive" });
+          toast({ title: "Gagal menyimpan", variant: "destructive" });
         },
       }
     );
@@ -121,11 +239,11 @@ export default function SettingsPage() {
   function handleTriggerSync() {
     triggerSync.mutate(undefined, {
       onSuccess: () => {
-        toast({ title: "Sync started", description: "Manual odds sync triggered." });
+        toast({ title: "Sync dimulai", description: "Manual odds sync berhasil ditrigger." });
         queryClient.invalidateQueries({ queryKey: getGetSyncStatusQueryKey() });
       },
       onError: () => {
-        toast({ title: "Sync failed", variant: "destructive" });
+        toast({ title: "Sync gagal", variant: "destructive" });
       },
     });
   }
@@ -135,7 +253,7 @@ export default function SettingsPage() {
       <div className="flex items-start justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-foreground">Settings</h1>
-          <p className="text-muted-foreground text-sm">Scheduler configuration and manual controls.</p>
+          <p className="text-muted-foreground text-sm">Konfigurasi scheduler dan kontrol manual.</p>
         </div>
         <Button
           variant="outline"
@@ -143,7 +261,11 @@ export default function SettingsPage() {
           disabled={triggerSync.isPending || syncStatus?.isRunning}
           data-testid="button-trigger-sync"
         >
-          <RefreshCw className={`w-4 h-4 mr-2 ${triggerSync.isPending || syncStatus?.isRunning ? "animate-spin" : ""}`} />
+          <RefreshCw
+            className={`w-4 h-4 mr-2 ${
+              triggerSync.isPending || syncStatus?.isRunning ? "animate-spin" : ""
+            }`}
+          />
           {syncStatus?.isRunning ? "Syncing..." : "Trigger Sync"}
         </Button>
       </div>
@@ -153,7 +275,11 @@ export default function SettingsPage() {
           <CardContent className="pt-4 flex flex-wrap gap-6 text-sm">
             <div>
               <span className="text-muted-foreground">Status </span>
-              <span className={`font-medium ${syncStatus.isRunning ? "text-amber-400" : "text-emerald-400"}`}>
+              <span
+                className={`font-medium ${
+                  syncStatus.isRunning ? "text-amber-400" : "text-emerald-400"
+                }`}
+              >
                 {syncStatus.isRunning ? "Running" : "Idle"}
               </span>
             </div>
@@ -164,7 +290,9 @@ export default function SettingsPage() {
             <div>
               <span className="text-muted-foreground">Last sync </span>
               <span className="font-mono text-xs">
-                {syncStatus.lastSyncAt ? new Date(syncStatus.lastSyncAt).toLocaleString() : "Never"}
+                {syncStatus.lastSyncAt
+                  ? new Date(syncStatus.lastSyncAt).toLocaleString()
+                  : "Never"}
               </span>
             </div>
           </CardContent>
@@ -175,39 +303,59 @@ export default function SettingsPage() {
         <CardHeader>
           <CardTitle className="text-base font-semibold">Scheduler Config</CardTitle>
           <CardDescription className="text-xs text-muted-foreground">
-            Controls which leagues, bookmakers, and markets are fetched on each cron run.
+            Centang liga dan market yang ingin di-fetch setiap cron run. Slug sudah terverifikasi — tidak perlu mengetik manual.
           </CardDescription>
         </CardHeader>
         <CardContent>
           {isLoading ? (
             <div className="space-y-4">
-              <Skeleton className="h-20 w-full" />
-              <Skeleton className="h-20 w-full" />
-              <Skeleton className="h-20 w-full" />
+              <Skeleton className="h-8 w-32" />
+              <div className="grid grid-cols-2 gap-2">
+                {Array.from({ length: 13 }).map((_, i) => (
+                  <Skeleton key={i} className="h-14 w-full rounded-md" />
+                ))}
+              </div>
+              <Skeleton className="h-8 w-32 mt-4" />
+              <div className="grid grid-cols-2 gap-2">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <Skeleton key={i} className="h-14 w-full rounded-md" />
+                ))}
+              </div>
             </div>
           ) : (
-            <form onSubmit={handleSave} className="space-y-6">
-              <TagList
-                label="Leagues"
-                items={leagues}
-                onChange={setLeagues}
-                placeholder="soccer_epl"
-                testId="leagues"
-              />
+            <form onSubmit={handleSave} className="space-y-8">
+              {catalog && (
+                <>
+                  <CheckboxGrid
+                    sectionLabel="Leagues"
+                    items={catalog.leagues}
+                    selected={leagues}
+                    onToggle={toggleLeague}
+                    getId={(l) => l.slug!}
+                    getLabel={(l) => `${l.name} · ${l.country}`}
+                    getMeta={(l) => l.slug}
+                  />
+
+                  <CheckboxGrid
+                    sectionLabel="Markets"
+                    items={catalog.markets}
+                    selected={markets}
+                    onToggle={toggleMarket}
+                    getId={(m) => m.key!}
+                    getLabel={(m) => m.label!}
+                    getMeta={(m) => m.description}
+                  />
+                </>
+              )}
+
               <TagList
                 label="Bookmakers"
                 items={bookmakers}
                 onChange={setBookmakers}
-                placeholder="bet365"
+                placeholder="Bet365"
                 testId="bookmakers"
               />
-              <TagList
-                label="Markets"
-                items={markets}
-                onChange={setMarkets}
-                placeholder="h2h"
-                testId="markets"
-              />
+
               <div className="space-y-1.5">
                 <Label htmlFor="cron">Cron Expression</Label>
                 <Input
@@ -219,12 +367,18 @@ export default function SettingsPage() {
                   data-testid="input-cron"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Default: <code className="text-primary">0 */3 * * *</code> — every 3 hours
+                  Default:{" "}
+                  <code className="text-primary">0 */3 * * *</code> — setiap 3 jam
                 </p>
               </div>
-              <Button type="submit" disabled={saveConfig.isPending} data-testid="button-save-config">
+
+              <Button
+                type="submit"
+                disabled={saveConfig.isPending}
+                data-testid="button-save-config"
+              >
                 <Save className="w-4 h-4 mr-2" />
-                {saveConfig.isPending ? "Saving..." : "Save Config"}
+                {saveConfig.isPending ? "Menyimpan..." : "Save Config"}
               </Button>
             </form>
           )}

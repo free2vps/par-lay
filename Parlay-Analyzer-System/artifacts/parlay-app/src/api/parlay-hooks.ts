@@ -120,6 +120,30 @@ export function useListStandings(params?: { league_name?: string; season?: strin
   });
 }
 
+/* ─── Catalog (leagues + markets from server) ─── */
+export interface LeagueCatalogItem {
+  slug: string;
+  name: string;
+  country: string;
+}
+export interface MarketCatalogItem {
+  key: string;
+  label: string;
+  description: string;
+}
+export interface Catalog {
+  leagues: LeagueCatalogItem[];
+  markets: MarketCatalogItem[];
+}
+export const getGetCatalogQueryKey = () => ["catalog"];
+export function useGetCatalog() {
+  return useQuery<Catalog>({
+    queryKey: getGetCatalogQueryKey(),
+    queryFn: () => apiGet(`${API_BASE}/catalog`),
+    staleTime: Infinity,
+  });
+}
+
 /* ─── Config ─── */
 export const getGetConfigQueryKey = () => ["config"];
 export function useGetConfig() {
