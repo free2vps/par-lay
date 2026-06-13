@@ -41,12 +41,23 @@ Data Odds Bandar: ${JSON.stringify(oddsData)}
 11. HT Win/Loss (Win/Draw/Loss %): ${JSON.stringify(awayStats.stats_ht)}`;
 }
 
+function hasStats(stats: Record<string, unknown>): boolean {
+  return Object.values(stats).some((v) => v !== null && v !== undefined);
+}
+
 export interface AnalysisResult {
   fixture_id: string;
   home_team: string;
   away_team: string;
   prediction_text: string;
   created_at: string;
+}
+
+export class StatsEmptyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StatsEmptyError";
+  }
 }
 
 export async function analyzeFixture(fixtureId: string): Promise<AnalysisResult> {
@@ -88,12 +99,12 @@ export async function analyzeFixture(fixtureId: string): Promise<AnalysisResult>
   const oddsData = oddsRows ?? [];
 
   /* ── 3. Fetch team stats (case-insensitive, partial match fallback) ── */
-  const fetchStats = async (teamName: string) => {
+  const fetchStats = async (teamName: string): Promise<Record<string, unknown>> => {
+    const cols = "stats_xg, stats_fts, stats_btts, stats_goals_conceded, stats_goals_scored, stats_shots, stats_over_25, stats_over_35, stats_under, stats_team_form, stats_ht";
+
     const { data, error } = await supabase
       .from("team_season_stats")
-      .select(
-        "stats_xg, stats_fts, stats_btts, stats_goals_conceded, stats_goals_scored, stats_shots, stats_over_25, stats_over_35, stats_under, stats_team_form, stats_ht",
-      )
+      .select(cols)
       .ilike("team_name", teamName)
       .limit(1)
       .maybeSingle();
@@ -102,19 +113,17 @@ export async function analyzeFixture(fixtureId: string): Promise<AnalysisResult>
       logger.warn({ error, teamName }, "Exact team stats lookup failed, trying partial match");
     }
 
-    if (data) return data;
+    if (data) return data as Record<string, unknown>;
 
     /* Partial match fallback */
     const { data: partial } = await supabase
       .from("team_season_stats")
-      .select(
-        "stats_xg, stats_fts, stats_btts, stats_goals_conceded, stats_goals_scored, stats_shots, stats_over_25, stats_over_35, stats_under, stats_team_form, stats_ht",
-      )
+      .select(cols)
       .ilike("team_name", `%${teamName.split(" ")[0]}%`)
       .limit(1)
       .maybeSingle();
 
-    return partial ?? {};
+    return (partial ?? {}) as Record<string, unknown>;
   };
 
   const [homeStats, awayStats] = await Promise.all([
@@ -122,12 +131,36 @@ export async function analyzeFixture(fixtureId: string): Promise<AnalysisResult>
     fetchStats(awayTeam),
   ]);
 
+  /* ── Terminal monitoring logs ── */
+  console.log(`\n[AI-ANALYSIS] Data ditarik untuk Home: ${homeTeam}, Away: ${awayTeam}`);
+  console.log(`[AI-ANALYSIS] Status JSONB ${homeTeam}:`);
+  const statKeys = ["stats_xg","stats_fts","stats_btts","stats_goals_conceded","stats_goals_scored","stats_shots","stats_over_25","stats_over_35","stats_under","stats_team_form","stats_ht"] as const;
+  for (const key of statKeys) {
+    const label = key.replace("stats_", "").toUpperCase();
+    console.log(`  Home ${label}: ${homeStats[key] != null ? "Ada ✓" : "Kosong/Null ✗"} | Away ${label}: ${awayStats[key] != null ? "Ada ✓" : "Kosong/Null ✗"}`);
+  }
+
+  /* ── Guard: block Gemini call if both teams have no stats ── */
+  const homeHasData = hasStats(homeStats);
+  const awayHasData = hasStats(awayStats);
+
+  if (!homeHasData && !awayHasData) {
+    console.log(`[AI-ANALYSIS] DITOLAK — kedua tim tidak memiliki data statistik di Supabase.\n`);
+    throw new StatsEmptyError("Data statistik belum lengkap di Supabase. Silakan upload CSV terlebih dahulu.");
+  }
+
+  if (!homeHasData || !awayHasData) {
+    const missing = !homeHasData ? homeTeam : awayTeam;
+    console.log(`[AI-ANALYSIS] PERINGATAN — data ${missing} tidak ditemukan, melanjutkan dengan data parsial.\n`);
+  }
+
   logger.info({ fixtureId, homeTeam, awayTeam }, "Sending data to Gemini for analysis");
+  console.log(`[AI-ANALYSIS] Mengirim data ke Gemini (gemini-2.0-flash)...\n`);
 
   /* ── 4. Call Gemini ── */
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
-    model: "gemini-1.5-pro",
+    model: "gemini-2.0-flash",
     systemInstruction: SYSTEM_INSTRUCTION,
   });
 
@@ -144,7 +177,7 @@ export async function analyzeFixture(fixtureId: string): Promise<AnalysisResult>
   });
 
   if (insertError) {
-    logger.warn({ insertError }, "Failed to save prediction to ai_predictions table — returning result anyway");
+    logger.warn({ insertError }, "Failed to save prediction to ai_predictions — returning result anyway");
   }
 
   return {

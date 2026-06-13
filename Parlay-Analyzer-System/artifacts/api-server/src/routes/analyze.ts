@@ -1,14 +1,13 @@
 import { Router, type IRouter } from "express";
-import { analyzeFixture } from "../services/ai-analysis";
+import { analyzeFixture, StatsEmptyError } from "../services/ai-analysis";
 import { logger } from "../lib/logger";
+import { supabase } from "../lib/supabase-client";
 
 const router: IRouter = Router();
 
 /**
  * POST /api/analyze/:fixtureId
- *
- * Fetches fixture + odds + team stats, calls Gemini 1.5 Pro,
- * saves the prediction to ai_predictions, and returns the result.
+ * Jalankan analisis baru, panggil Gemini, simpan & kembalikan hasil.
  */
 router.post("/analyze/:fixtureId", async (req, res) => {
   const { fixtureId } = req.params;
@@ -23,6 +22,10 @@ router.post("/analyze/:fixtureId", async (req, res) => {
     const result = await analyzeFixture(fixtureId);
     res.json(result);
   } catch (err) {
+    if (err instanceof StatsEmptyError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     const message = err instanceof Error ? err.message : "Unknown error";
     logger.error({ err, fixtureId }, "AI analysis failed");
     res.status(500).json({ error: message });
@@ -31,15 +34,12 @@ router.post("/analyze/:fixtureId", async (req, res) => {
 
 /**
  * GET /api/analyze/:fixtureId
- *
- * Retrieve the most recent saved prediction for a fixture
- * without re-running the AI call.
+ * Ambil prediksi terakhir yang sudah tersimpan (tanpa memanggil Gemini lagi).
  */
 router.get("/analyze/:fixtureId", async (req, res) => {
   const { fixtureId } = req.params;
 
   try {
-    const { supabase } = await import("../lib/supabase-client");
     const { data, error } = await supabase
       .from("ai_predictions")
       .select("*")

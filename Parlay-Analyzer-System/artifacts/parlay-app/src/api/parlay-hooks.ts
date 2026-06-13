@@ -148,3 +148,47 @@ export function useTriggerSync() {
     },
   });
 }
+
+/* ─── AI Analysis ─── */
+export interface AIAnalysisResult {
+  fixture_id: string;
+  home_team?: string;
+  away_team?: string;
+  prediction_text: string;
+  created_at: string;
+}
+
+async function apiGetRaw(url: string): Promise<Response> {
+  return fetch(url);
+}
+
+export const getAIPredictionQueryKey = (fixtureId: string | number) => ["analyze", String(fixtureId)];
+
+export function useGetAIPrediction(fixtureId: string | number) {
+  return useQuery<AIAnalysisResult | null>({
+    queryKey: getAIPredictionQueryKey(fixtureId),
+    queryFn: async () => {
+      const res = await apiGetRaw(`${API_BASE}/analyze/${fixtureId}`);
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`API ${res.status}`);
+      return res.json();
+    },
+    enabled: !!fixtureId,
+    retry: false,
+  });
+}
+
+export function useRunAIAnalysis() {
+  const queryClient = useQueryClient();
+  return useMutation<AIAnalysisResult, Error, string | number>({
+    mutationFn: async (fixtureId) => {
+      const res = await fetch(`${API_BASE}/analyze/${fixtureId}`, { method: "POST" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? `API ${res.status}`);
+      return json;
+    },
+    onSuccess: (_data, fixtureId) => {
+      queryClient.invalidateQueries({ queryKey: getAIPredictionQueryKey(fixtureId) });
+    },
+  });
+}
