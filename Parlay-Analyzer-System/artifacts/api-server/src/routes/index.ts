@@ -5,6 +5,7 @@ import configRouter from "./config";
 import csvRouter from "./csv";
 import seasonCsvRouter from "./season-csv";
 import supabaseRouter from "./supabase";
+import analyzeRouter from "./analyze";
 
 const router: IRouter = Router();
 
@@ -14,5 +15,6 @@ router.use(configRouter);
 router.use(csvRouter);
 router.use(seasonCsvRouter);
 router.use(supabaseRouter);
+router.use(analyzeRouter);
 
 export default router;
