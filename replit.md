@@ -167,6 +167,15 @@ Parlay-Analyzer-System/
 
 Gunakan **Replit Secrets tab** (Secrets di UI Replit) atau environment variables. **JANGAN** simpan API key di file `.env` atau kode.
 
+### Secrets GitHub (Opsional)
+
+| Secret | Digunakan Di | Deskripsi |
+|--------|--------------|-----------|
+| `GITHUB_ACCESS_TOKEN` | Git push | GitHub Personal Access Token untuk push ke repo |
+| `GITHUB_REPO_URL` | Git push | URL repo GitHub (e.g., `https://github.com/free2vps/par-lay`) |
+
+Gunakan token ini untuk push perubahan ke GitHub secara otomatis. Scope token: `repo`.
+
 ---
 
 ## 6. Workflows & Deployment
@@ -408,6 +417,8 @@ Tidak ada preferensi spesifik yang diberikan user.
 - **Port:** 5000 (frontend) dan 8080 (backend) di-map di `.replit`.
 - **Deployment:** Configured autoscale deployment.
 - **Status:** Berjalan dengan normal. API berfungsi, AI analysis available, scheduler aktif.
+- **GitHub:** `GITHUB_ACCESS_TOKEN` dan `GITHUB_REPO_URL` ditambahkan untuk push ke GitHub.
+- **replit.md:** Dibuat untuk dokumentasi agar agent AI lain paham arsitektur dan alur kerja.
 
 ---
 
